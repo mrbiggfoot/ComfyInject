@@ -197,7 +197,77 @@ function addRetryButtons(index) {
         });
 
         wrapper.appendChild(btn);
+
+        // Create the left/right navigation buttons
+        addNavButtons(wrapper, img, sendDate, imgIndex);
     });
+}
+
+/**
+ * Adds left/right navigation buttons to one image's wrapper.
+ * The buttons cycle through the versions of this image (the original
+ * generation plus every result of its regenerate button) with wrap-around.
+ * Images from other markers in the message are never shown.
+ * Navigation is display-only: only the visible <img> src changes,
+ * the saved message and metadata are untouched, so the latest saved
+ * version returns on the next re-render (swipe, edit, or reload).
+ * While the image has a single version the buttons are present but do nothing.
+ * @param {HTMLElement} wrapper - The image wrapper element
+ * @param {HTMLElement} img - The image element to navigate
+ * @param {string} sendDate - The send_date of the message
+ * @param {number} imgIndex - 0-based index of this image in the message
+ */
+function addNavButtons(wrapper, img, sendDate, imgIndex) {
+    // Display position within the version history. Starts on the latest
+    // saved version; buttons are re-created on every re-render, which
+    // resets this along with the restored <img> src.
+    let displayIndex = -1;
+
+    const navigate = (direction) => {
+        const context = SillyTavern.getContext();
+        const metadata = context.chatMetadata[MODULE_NAME];
+        if (!metadata) return;
+
+        const messageIndex = findIndexBySendDate(sendDate);
+        let images = getImageData(metadata, sendDate);
+        if (images.length === 0 && messageIndex !== -1) {
+            images = getImageData(metadata, messageIndex);
+        }
+
+        const entry = images[imgIndex] || {};
+        const history = Array.isArray(entry.history) ? entry.history : [];
+        if (history.length <= 1) return;
+
+        if (displayIndex < 0) displayIndex = history.length - 1;
+        const step = direction === "prev" ? -1 : 1;
+        displayIndex = (displayIndex + step + history.length) % history.length;
+
+        const version = history[displayIndex];
+        if (version?.imageUrl) {
+            img.src = version.imageUrl;
+        }
+    };
+
+    const buttons = [
+        { className: "comfyinject-nav-left", icon: "fa-chevron-left", direction: "prev", side: "left: 6px;", title: "Previous version" },
+        { className: "comfyinject-nav-right", icon: "fa-chevron-right", direction: "next", side: "right: 6px;", title: "Next version" },
+    ];
+
+    for (const { className, icon, direction, side, title } of buttons) {
+        const btn = document.createElement("div");
+        btn.className = className;
+        btn.title = title;
+        btn.style.cssText = `position: absolute; top: 50%; ${side} transform: translateY(-50%); cursor: pointer; background: rgba(0,0,0,0.6); color: white; border-radius: 4px; padding: 2px 8px; font-size: 12px; z-index: 10;`;
+        btn.innerHTML = `<i class="fa-solid ${icon}"></i>`;
+
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            navigate(direction);
+        });
+
+        wrapper.appendChild(btn);
+    }
 }
 
 /**
@@ -289,6 +359,7 @@ async function processMessage(index, options = {}) {
             const imgTag = buildImgTag(imageUrl, prompt, seed);
             message.mes = message.mes.replace(MARKER_REGEX, imgTag);
             metadataArray.push({
+                seed,
                 ar,
                 shot,
                 promptId,
@@ -298,6 +369,9 @@ async function processMessage(index, options = {}) {
                 resolution,
                 shotTags,
                 repairMeta,
+                history: [
+                    { seed, imageUrl, promptId, filename },
+                ],
             });
         } else if (result?.status === "parse_error") {
             // The marker was found, but parsing could not recover a usable prompt.
@@ -432,6 +506,24 @@ async function scanExistingMessages() {
 }
 
 /**
+ * Appends a newly generated version to an image's version history.
+ * If the history is missing (legacy chat) and an old version is known,
+ * the old version is recorded first so nothing is lost.
+ * @param {Array<object>|undefined} history - The existing history array
+ * @param {object|null} oldVersion - The version being replaced
+ * @param {object} newVersion - The newly generated version
+ * @returns {Array<object>} The updated history array
+ */
+function appendVersionHistory(history, oldVersion, newVersion) {
+    const versions = Array.isArray(history) ? [...history] : [];
+    if (versions.length === 0 && oldVersion) {
+        versions.push(oldVersion);
+    }
+    versions.push(newVersion);
+    return versions;
+}
+
+/**
  * Retries image generation for a specific image within a message with a new random seed.
  * Uses send_date to look up metadata (stable across deletions).
  * @param {string} sendDate - The send_date of the message to retry
@@ -456,6 +548,10 @@ async function retryImage(sendDate, imgIndex) {
 
     const prompt = targetTag[0].match(/data-prompt="([^"]*)"/)?.[1]?.replace(/&quot;/g, '"') || "";
     if (!prompt) return;
+
+    // Remember the version being replaced so it can be kept in the history
+    const oldUrl = targetTag[0].match(/src="([^"]*)"/)?.[1] || null;
+    const oldSeed = parseInt(targetTag[0].match(/data-seed="([^"]*)"/)?.[1], 10) || 0;
 
     // Look up metadata for supplementary fields (ar, shot)
     const images = getImageData(metadata, sendDate).length > 0
@@ -511,10 +607,17 @@ async function retryImage(sendDate, imgIndex) {
     const metaKey = metadata[sendDate] ? sendDate : messageIndex;
     const metaEntry = metadata[metaKey];
 
+    const newVersion = { seed: effectiveSeed, imageUrl, promptId, filename };
+
     if (Array.isArray(metaEntry)) {
         const existingEntry = metaEntry[imgIndex] && typeof metaEntry[imgIndex] === "object"
             ? metaEntry[imgIndex]
             : {};
+
+        const oldVersion = oldUrl
+            ? { seed: oldSeed, imageUrl: oldUrl, promptId: existingEntry.promptId ?? null, filename: existingEntry.filename ?? null }
+            : null;
+        const history = appendVersionHistory(existingEntry.history, oldVersion, newVersion);
 
         metaEntry[imgIndex] = {
             ...existingEntry,
@@ -528,8 +631,14 @@ async function retryImage(sendDate, imgIndex) {
             resolution,
             shotTags,
             repairMeta: existingEntry.repairMeta || null,
+            history,
         };
     } else if (metaEntry && typeof metaEntry === "object") {
+        const oldVersion = oldUrl
+            ? { seed: oldSeed, imageUrl: oldUrl, promptId: metaEntry.promptId ?? null, filename: metaEntry.filename ?? null }
+            : null;
+        const history = appendVersionHistory(metaEntry.history, oldVersion, newVersion);
+
         metadata[metaKey] = {
             ...metaEntry,
             seed: effectiveSeed,
@@ -542,6 +651,7 @@ async function retryImage(sendDate, imgIndex) {
             resolution,
             shotTags,
             repairMeta: metaEntry.repairMeta || null,
+            history,
         };
     }
 

@@ -24,6 +24,7 @@ When your LLM outputs a marker, ComfyInject intercepts it, sends the prompt to C
     <li><a href="#system-prompt">System Prompt</a></li>
     <li><a href="#image-gallery">Image Gallery</a></li>
     <li><a href="#retry-button">Retry Button</a></li>
+    <li><a href="#image-navigation">Image Navigation</a></li>
     <li><a href="#custom-workflows">Custom Workflows</a></li>
     <li><a href="#how-it-works">How It Works</a></li>
     <li><a href="#known-limitations">Known Limitations</a></li>
@@ -335,9 +336,19 @@ The gallery always reflects what's currently on screen — swiping to a differen
 
 Every generated image has a small retry button (rotate icon) in the top-right corner. Clicking it regenerates that specific image with a new random seed while keeping the same prompt, aspect ratio, and shot type. The retry button always bypasses the seed lock setting to guarantee a different result.
 
-During regeneration, the button shows a spinning icon. The new image replaces the old one in the chat and is saved permanently.
+During regeneration, the button shows a spinning icon. The new image replaces the old one in the chat and is saved permanently. Previous versions are kept, so you can flip between them with the image's left and right arrows — see [Image Navigation](#image-navigation).
 
 In messages with multiple images, each retry button only affects its own image — the others are left untouched.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
+## Image Navigation
+
+Every generated image also has small left and right arrow buttons on its edges. The arrows cycle through the **versions of that image** — its original generation plus every result produced by its regenerate button. The left arrow shows the previous version and the right arrow shows the next one, wrapping around at the ends. Images from other markers in the message are never shown.
+
+Navigation is display-only: only the visible image changes. The saved chat, image metadata, and what the LLM sees on the next turn are all untouched, and the latest saved version returns on the next re-render (swipe, edit, or page reload). While an image has only one version (it was never regenerated) the buttons are present but do nothing.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -360,9 +371,9 @@ To use your own workflow, see `workflows/README.md` for placeholder requirements
 3. For each marker, the workflow is filled with your settings and sent to ComfyUI sequentially
 4. ComfyInject polls `/history` until each image is ready
 5. Each marker is replaced with an `<img>` tag in the chat permanently
-6. Image metadata (AR, shot, prompt ID, filename, effective settings, and repair metadata) is saved to chat metadata keyed by message timestamp for stability across deletions
+6. Image metadata (AR, shot, prompt ID, filename, effective settings, repair metadata, and the version history of every regeneration) is saved to chat metadata keyed by message timestamp for stability across deletions
 7. On the next generation, the outbound interceptor replaces `<img>` tags with `[[IMG: prompt | seed ]]` tokens so the LLM sees a compact text reference instead of raw HTML
-8. Retry buttons are injected via DOM manipulation after each render
+8. Retry and image navigation buttons are injected via DOM manipulation after each render
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
