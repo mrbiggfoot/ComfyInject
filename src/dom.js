@@ -3,6 +3,10 @@ import { generateImage } from "./comfy.js";
 import { saveLastSeed, getImageData } from "./state.js";
 import { MODULE_NAME } from "../settings.js";
 
+// Maximum rendered size of an image's longest side.
+// Clicking an image toggles between this cap and its original size.
+const MAX_DISPLAY_SIDE = "512px";
+
 /**
  * Builds the <img> tag string that gets injected into the message.
  * Stores prompt and seed as data attributes for outbound.js to read.
@@ -150,6 +154,71 @@ function formatMarkerPosition(markerNumber, totalMarkers) {
 }
 
 /**
+ * Caps the displayed size of a rendered image so the longest side
+ * never exceeds MAX_DISPLAY_SIDE. Display-only: the saved message
+ * and the file on disk are never touched.
+ * @param {HTMLElement} img - The image element
+ */
+function capImageDisplaySize(img) {
+    img.style.maxWidth = MAX_DISPLAY_SIDE;
+    img.style.maxHeight = MAX_DISPLAY_SIDE;
+    img.style.width = "auto";
+    img.style.height = "auto";
+    img.style.cursor = "zoom-in";
+}
+
+/**
+ * Opens a full-browser-window overlay showing the given image at its
+ * original size. The width is capped to the window width only when the
+ * image is wider than the window; otherwise the original size is kept,
+ * even if the height exceeds the window (the overlay scrolls).
+ * Closes on click or Escape.
+ * @param {string} src - The image URL to display
+ */
+function openFullImage(src) {
+    closeFullImage();
+
+    const overlay = document.createElement("div");
+    overlay.id = "comfyinject-fullimage-overlay";
+    overlay.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0, 0, 0, 0.85); z-index: 9999;
+        display: flex; overflow: auto; cursor: zoom-out;
+    `;
+
+    const fullImg = document.createElement("img");
+    fullImg.src = src;
+    // Width-only cap: max-width resolves against the window, so the image
+    // is scaled only when wider than the window. Height stays original and
+    // the overlay scrolls. margin: auto centers the image when it fits and
+    // keeps the top edge reachable when it overflows.
+    fullImg.style.cssText = "max-width: 100%; max-height: none; width: auto; height: auto; margin: auto;";
+
+    const escHandler = (e) => {
+        if (e.key === "Escape") closeFullImage();
+    };
+    overlay._escHandler = escHandler;
+
+    overlay.addEventListener("click", closeFullImage);
+    document.addEventListener("keydown", escHandler);
+
+    overlay.appendChild(fullImg);
+    document.body.appendChild(overlay);
+}
+
+/**
+ * Closes the full-image overlay if it is open.
+ */
+function closeFullImage() {
+    const overlay = document.getElementById("comfyinject-fullimage-overlay");
+    if (!overlay) return;
+    if (overlay._escHandler) {
+        document.removeEventListener("keydown", overlay._escHandler);
+    }
+    overlay.remove();
+}
+
+/**
  * Adds retry buttons to all rendered comfyinject images in a message.
  * This is done via DOM manipulation (not in message.mes) because
  * ST's HTML sanitizer strips custom divs when rendering messages.
@@ -180,6 +249,14 @@ function addRetryButtons(index) {
         wrapper.style.cssText = "position: relative; display: inline-block;";
         img.parentElement.insertBefore(wrapper, img);
         wrapper.appendChild(img);
+
+        // Cap the displayed size and open a full-window view on click
+        capImageDisplaySize(img);
+        img.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            openFullImage(img.src);
+        });
 
         // Create the retry button
         const btn = document.createElement("div");

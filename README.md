@@ -25,6 +25,7 @@ When your LLM outputs a marker, ComfyInject intercepts it, sends the prompt to C
     <li><a href="#image-gallery">Image Gallery</a></li>
     <li><a href="#retry-button">Retry Button</a></li>
     <li><a href="#image-navigation">Image Navigation</a></li>
+    <li><a href="#image-display">Image Display</a></li>
     <li><a href="#custom-workflows">Custom Workflows</a></li>
     <li><a href="#how-it-works">How It Works</a></li>
     <li><a href="#known-limitations">Known Limitations</a></li>
@@ -349,6 +350,16 @@ In messages with multiple images, each retry button only affects its own image �
 Every generated image also has small left and right arrow buttons on its edges. The arrows cycle through the **versions of that image** — its original generation plus every result produced by its regenerate button. The left arrow shows the previous version and the right arrow shows the next one, wrapping around at the ends. Images from other markers in the message are never shown.
 
 Navigation is display-only: only the visible image changes. The saved chat, image metadata, and what the LLM sees on the next turn are all untouched, and the latest saved version returns on the next re-render (swipe, edit, or page reload). While an image has only one version (it was never regenerated) the buttons are present but do nothing.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
+## Image Display
+
+Generated images are displayed capped at 512px on the longest side; images smaller than that keep their native size and are never upscaled. Click an image to open it in a view that covers the whole browser window: images wider than the window are scaled to exactly the window width, otherwise they are shown at their original size — even if they are taller than the window, in which case the view scrolls. Click again or press Escape to close the view and return to the chat.
+
+This is display-only CSS: the original file on disk is never modified and no resized copy is stored.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
