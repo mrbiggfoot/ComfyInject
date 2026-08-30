@@ -24,6 +24,7 @@ When your LLM outputs a marker, ComfyInject intercepts it, sends the prompt to C
     <li><a href="#system-prompt">System Prompt</a></li>
     <li><a href="#image-gallery">Image Gallery</a></li>
     <li><a href="#retry-button">Retry Button</a></li>
+    <li><a href="#image-settings">Image Settings</a></li>
     <li><a href="#image-navigation">Image Navigation</a></li>
     <li><a href="#image-display">Image Display</a></li>
     <li><a href="#custom-workflows">Custom Workflows</a></li>
@@ -345,6 +346,21 @@ In messages with multiple images, each retry button only affects its own image �
 
 ---
 
+## Image Settings
+
+Every generated image also has a small settings button (gear icon) next to the retry button. Clicking it opens a dialog where you can:
+
+- Edit the **prompt** used to generate the image
+- Choose the **orientation** — Portrait or Landscape — with the exact pixel resolution taken from the [Resolutions](#configuration) settings shown next to each option
+
+When **Lock Resolution** is enabled, the orientation sizes are inferred from the locked resolution: portrait uses the shorter width, landscape uses the shorter height. A note in the dialog indicates this.
+
+Pressing **Regenerate** closes the dialog immediately and creates a new version of the image with the edited prompt, the chosen orientation, and a new random seed (the seed lock is bypassed, like the retry button — the retry button's spinner shows the progress). The edited prompt and the chosen orientation are saved to the image, so they're what the LLM sees on the next turn and what every subsequent plain retry reuses. As with retry, the new version is added to the image's version history.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
 ## Image Navigation
 
 Every generated image also has small left and right arrow buttons on its edges. The arrows cycle through the **versions of that image** — its original generation plus every result produced by its regenerate button. The left arrow shows the previous version and the right arrow shows the next one, wrapping around at the ends. Images from other markers in the message are never shown.
@@ -384,7 +400,7 @@ To use your own workflow, see `workflows/README.md` for placeholder requirements
 5. Each marker is replaced with an `<img>` tag in the chat permanently
 6. Image metadata (AR, shot, prompt ID, filename, effective settings, repair metadata, and the version history of every regeneration) is saved to chat metadata keyed by message timestamp for stability across deletions
 7. On the next generation, the outbound interceptor replaces `<img>` tags with `[[IMG: prompt | seed ]]` tokens so the LLM sees a compact text reference instead of raw HTML
-8. Retry and image navigation buttons are injected via DOM manipulation after each render
+8. Retry, image settings, and image navigation buttons are injected via DOM manipulation after each render
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

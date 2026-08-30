@@ -130,15 +130,21 @@ function buildImageUrl(filename, subfolder, host) {
  * @param {number} params.seed - The resolved numeric seed (LOCK/RANDOM already resolved by state.js)
  * @param {number} params.messageIndex - The index of the message being processed (needed for LOCK seed resolution)
  * @param {boolean} [params.bypassSeedLock] - If true, skip the seed lock and use the provided seed directly (used by retry)
+ * @param {object} [params.resolution] - Explicit {width, height} override. Takes precedence over both the
+ *   resolution lock and the AR token lookup (used by the image settings dialog).
  * @returns {Promise<{imageUrl: string, seed: number, prompt: string, promptId: string, filename: string, effectiveAr: string, effectiveShot: string, resolution: {width: number, height: number}, shotTags: string}>}
  */
-export async function generateImage({ prompt, ar, shot, seed, messageIndex, bypassSeedLock = false }) {
+export async function generateImage({ prompt, ar, shot, seed, messageIndex, bypassSeedLock = false, resolution: resolutionOverride = null }) {
     const settings = getSettings();
 
-    // Resolve resolution — use locked resolution if enabled, otherwise use the AR token
-    const resolution = settings.resolution_lock_enabled
-        ? settings.resolution_lock
-        : settings.resolutions[ar];
+    // Resolve resolution — explicit override wins, then locked resolution if enabled, then the AR token
+    let resolution = resolutionOverride;
+
+    if (!resolution) {
+        resolution = settings.resolution_lock_enabled
+            ? settings.resolution_lock
+            : settings.resolutions[ar];
+    }
 
     if (!resolution) {
         throw new Error(`[ComfyInject] Unknown AR token: ${ar}`);
@@ -192,7 +198,7 @@ export async function generateImage({ prompt, ar, shot, seed, messageIndex, bypa
         promptId,
         filename,
         // Effective values — what was actually sent to ComfyUI
-        effectiveAr: settings.resolution_lock_enabled ? "LOCKED" : ar,
+        effectiveAr: resolutionOverride ? ar : (settings.resolution_lock_enabled ? "LOCKED" : ar),
         effectiveShot: settings.shot_lock_enabled ? "LOCKED" : shot,
         resolution: { width: resolution.width, height: resolution.height },
         shotTags: shotTag,

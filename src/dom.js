@@ -275,6 +275,23 @@ function addRetryButtons(index) {
 
         wrapper.appendChild(btn);
 
+        // Create the image settings button (gear) next to the retry button
+        const settingsBtn = document.createElement("div");
+        settingsBtn.className = "comfyinject-image-settings";
+        settingsBtn.dataset.senddate = sendDate;
+        settingsBtn.dataset.imgindex = imgIndex;
+        settingsBtn.title = "Edit prompt and orientation";
+        settingsBtn.style.cssText = "position: absolute; top: 6px; right: 40px; cursor: pointer; background: rgba(0,0,0,0.6); color: white; border-radius: 4px; padding: 2px 8px; font-size: 12px; z-index: 10;";
+        settingsBtn.innerHTML = `<i class="fa-solid fa-gear"></i>`;
+
+        settingsBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            openImageSettingsDialog(sendDate, imgIndex);
+        });
+
+        wrapper.appendChild(settingsBtn);
+
         // Create the left/right navigation buttons
         addNavButtons(wrapper, img, sendDate, imgIndex);
     });
@@ -605,26 +622,33 @@ function appendVersionHistory(history, oldVersion, newVersion) {
  * Uses send_date to look up metadata (stable across deletions).
  * @param {string} sendDate - The send_date of the message to retry
  * @param {number} imgIndex - Which image within the message to retry (0-based)
+ * @param {object} [overrides] - Optional values that take precedence over the stored ones
+ * @param {string} [overrides.prompt] - Prompt to use instead of the one stored in the img tag
+ * @param {string} [overrides.ar] - AR token to force (e.g. "PORTRAIT" or "LANDSCAPE")
+ * @param {{width: number, height: number}} [overrides.resolution] - Explicit pixel resolution
+ * @returns {Promise<boolean>} True if the generation succeeded
  */
-async function retryImage(sendDate, imgIndex) {
+async function retryImage(sendDate, imgIndex, overrides = {}) {
     const context = SillyTavern.getContext();
     const { updateMessageBlock } = SillyTavern.getContext();
     const metadata = context.chatMetadata[MODULE_NAME];
 
     // Find the current array index for this message
     const messageIndex = findIndexBySendDate(sendDate);
-    if (messageIndex === -1) return;
+    if (messageIndex === -1) return false;
 
     const message = context.chat[messageIndex];
-    if (!message || !metadata) return;
+    if (!message || !metadata) return false;
 
     // Parse prompt from the img tag in mes (source of truth, not stored in metadata)
     const imgTags = [...message.mes.matchAll(/<img class="comfyinject-image"[^>]*>/g)];
     const targetTag = imgTags[imgIndex];
-    if (!targetTag) return;
+    if (!targetTag) return false;
 
-    const prompt = targetTag[0].match(/data-prompt="([^"]*)"/)?.[1]?.replace(/&quot;/g, '"') || "";
-    if (!prompt) return;
+    const tagPrompt = targetTag[0].match(/data-prompt="([^"]*)"/)?.[1]?.replace(/&quot;/g, '"') || "";
+    // A dialog-provided prompt takes precedence over the stored one
+    const prompt = overrides.prompt || tagPrompt;
+    if (!prompt) return false;
 
     // Remember the version being replaced so it can be kept in the history
     const oldUrl = targetTag[0].match(/src="([^"]*)"/)?.[1] || null;
@@ -640,8 +664,19 @@ async function retryImage(sendDate, imgIndex) {
 
     // Fall back to the same marker-level defaults used by the parser
     // if metadata is missing or incomplete.
-    const retryAr = ar || "SQUARE";
+    const retryAr = overrides.ar || ar || "SQUARE";
     const retryShot = shot || "MEDIUM";
+
+    // Resolve the pixel resolution for this generation.
+    // An explicit override (from the image settings dialog) always wins.
+    // Without one, a plain retry of a portrait/landscape image while the
+    // resolution lock is enabled uses the same inferred orientation
+    // resolution the dialog uses, so the last selected orientation sticks.
+    const settings = context.extensionSettings[MODULE_NAME];
+    const resolutionOverride = overrides.resolution
+        || ((settings.resolution_lock_enabled && (retryAr === "PORTRAIT" || retryAr === "LANDSCAPE"))
+            ? getOrientationResolution(retryAr)
+            : undefined);
 
     // Generate a new random seed using the shared project-wide max safe integer range.
     const newSeed = Math.floor(Math.random() * 9007199254740991);
@@ -662,6 +697,7 @@ async function retryImage(sendDate, imgIndex) {
             seed: newSeed,
             messageIndex,
             bypassSeedLock: true,
+            resolution: resolutionOverride,
         });
     } catch (err) {
         console.error(`[ComfyInject] Retry failed for message ${messageIndex} image ${imgIndex}:`, err);
@@ -671,7 +707,7 @@ async function retryImage(sendDate, imgIndex) {
             retryBtn.innerHTML = `<i class="fa-solid fa-rotate"></i>`;
             retryBtn.style.pointerEvents = "auto";
         }
-        return;
+        return false;
     }
 
     const { imageUrl, seed: effectiveSeed, promptId, filename, effectiveAr, effectiveShot, resolution, shotTags } = result;
@@ -699,7 +735,7 @@ async function retryImage(sendDate, imgIndex) {
         metaEntry[imgIndex] = {
             ...existingEntry,
             seed: effectiveSeed,
-            ar: existingEntry.ar || retryAr,
+            ar: overrides.ar || existingEntry.ar || retryAr,
             shot: existingEntry.shot || retryShot,
             promptId,
             filename,
@@ -719,7 +755,7 @@ async function retryImage(sendDate, imgIndex) {
         metadata[metaKey] = {
             ...metaEntry,
             seed: effectiveSeed,
-            ar: metaEntry.ar || retryAr,
+            ar: overrides.ar || metaEntry.ar || retryAr,
             shot: metaEntry.shot || retryShot,
             promptId,
             filename,
@@ -757,6 +793,209 @@ async function retryImage(sendDate, imgIndex) {
     // Persist
     await context.saveMetadata();
     await context.saveChat();
+
+    return true;
+}
+
+/**
+ * Computes the pixel resolution used for an orientation choice.
+ * When the resolution lock is enabled, the orientation resolutions are
+ * inferred from the locked resolution: portrait is the shorter-width
+ * variant, landscape is the shorter-height variant. Otherwise the
+ * resolution is taken from the per-AR-token settings table.
+ * @param {"PORTRAIT" | "LANDSCAPE"} ar - The orientation token
+ * @returns {{width: number, height: number}}
+ */
+function getOrientationResolution(ar) {
+    const settings = SillyTavern.getContext().extensionSettings[MODULE_NAME];
+
+    if (settings.resolution_lock_enabled) {
+        const shortSide = Math.min(settings.resolution_lock.width, settings.resolution_lock.height);
+        const longSide = Math.max(settings.resolution_lock.width, settings.resolution_lock.height);
+        return ar === "PORTRAIT"
+            ? { width: shortSide, height: longSide }
+            : { width: longSide, height: shortSide };
+    }
+
+    return settings.resolutions[ar] ?? { width: 512, height: 512 };
+}
+
+/**
+ * Opens the image settings dialog for one rendered image.
+ * Allows editing the prompt and choosing the orientation (portrait or
+ * landscape, with the pixel resolution taken from the extension
+ * settings), then regenerates the image with a new random seed.
+ * @param {string} sendDate - The send_date of the message
+ * @param {number} imgIndex - Which image within the message (0-based)
+ */
+function openImageSettingsDialog(sendDate, imgIndex) {
+    closeImageSettingsDialog();
+
+    const context = SillyTavern.getContext();
+    const settings = context.extensionSettings[MODULE_NAME];
+    const metadata = context.chatMetadata[MODULE_NAME];
+
+    const messageIndex = findIndexBySendDate(sendDate);
+    const message = context.chat[messageIndex];
+    if (!message) return;
+
+    // Current prompt — the img tag's data attribute is the source of truth
+    const imgTags = [...message.mes.matchAll(/<img class="comfyinject-image"[^>]*>/g)];
+    const currentPrompt = imgTags[imgIndex]?.[0].match(/data-prompt="([^"]*)"/)?.[1]?.replace(/&quot;/g, '"') || "";
+
+    // Current AR token and resolution from metadata (send_date key, legacy index fallback)
+    let images = metadata ? getImageData(metadata, sendDate) : [];
+    if (images.length === 0 && messageIndex !== -1) {
+        images = getImageData(metadata, messageIndex);
+    }
+    const imageData = images[imgIndex] || {};
+    const currentAr = imageData.ar;
+    const currentResolution = imageData.resolution;
+
+    // Pre-select the orientation: the current AR when it matches, otherwise
+    // infer it from the image's current resolution (wider → landscape,
+    // taller → portrait, square or unknown → portrait)
+    let selectedAr;
+    if (currentAr === "PORTRAIT" || currentAr === "LANDSCAPE") {
+        selectedAr = currentAr;
+    } else if (currentResolution) {
+        selectedAr = currentResolution.width > currentResolution.height ? "LANDSCAPE" : "PORTRAIT";
+    } else {
+        selectedAr = "PORTRAIT";
+    }
+
+    const portraitRes = getOrientationResolution("PORTRAIT");
+    const landscapeRes = getOrientationResolution("LANDSCAPE");
+
+    // Overlay
+    const overlay = document.createElement("div");
+    overlay.id = "comfyinject-image-settings-overlay";
+    overlay.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0, 0, 0, 0.75); z-index: 9999;
+        display: flex; align-items: center; justify-content: center;
+    `;
+
+    // Panel
+    const panel = document.createElement("div");
+    panel.style.cssText = `
+        width: 480px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
+        overflow-y: auto; border-radius: 8px; padding: 16px 20px;
+        background: var(--theme-background, #222); color: var(--theme-text, white);
+        border: 1px solid var(--theme-bar, #444);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        font-size: 13px;
+    `;
+
+    // Header
+    const header = document.createElement("div");
+    header.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;";
+    header.innerHTML = `<span style="font-size: 16px; font-weight: bold;"><i class="fa-solid fa-gear"></i> Image Settings</span>`;
+
+    const closeBtn = document.createElement("div");
+    closeBtn.style.cssText = "cursor: pointer; font-size: 18px; padding: 4px 8px; opacity: 0.8;";
+    closeBtn.innerHTML = `<i class="fa-solid fa-xmark"></i>`;
+    closeBtn.addEventListener("click", closeImageSettingsDialog);
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+
+    // Prompt
+    const promptField = document.createElement("div");
+    promptField.style.cssText = "margin-bottom: 14px;";
+    promptField.innerHTML = `
+        <div style="margin-bottom: 4px; font-weight: bold;">Prompt</div>
+        <textarea class="text_pole" rows="6" style="width: 100%; resize: vertical;"></textarea>
+    `;
+    panel.appendChild(promptField);
+    const promptTextarea = promptField.querySelector("textarea");
+    promptTextarea.value = currentPrompt;
+
+    // Orientation
+    const orientationField = document.createElement("div");
+    orientationField.style.cssText = "margin-bottom: 6px;";
+    orientationField.innerHTML = `
+        <div style="margin-bottom: 4px; font-weight: bold;">Orientation</div>
+        <label class="checkbox_label" style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; cursor: pointer;">
+            <input type="radio" name="comfyinject-settings-ar" value="PORTRAIT" ${selectedAr === "PORTRAIT" ? "checked" : ""} />
+            <span>Portrait (${portraitRes.width} &times; ${portraitRes.height})</span>
+        </label>
+        <label class="checkbox_label" style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="radio" name="comfyinject-settings-ar" value="LANDSCAPE" ${selectedAr === "LANDSCAPE" ? "checked" : ""} />
+            <span>Landscape (${landscapeRes.width} &times; ${landscapeRes.height})</span>
+        </label>
+    `;
+    panel.appendChild(orientationField);
+
+    // Resolution lock note
+    if (settings.resolution_lock_enabled) {
+        const note = document.createElement("div");
+        note.style.cssText = "margin-bottom: 10px; font-size: 11px; opacity: 0.7;";
+        note.innerHTML = `Resolution lock is enabled — these sizes are inferred from the locked resolution (${settings.resolution_lock.width} &times; ${settings.resolution_lock.height}).`;
+        panel.appendChild(note);
+    }
+
+    // Footer
+    const footer = document.createElement("div");
+    footer.style.cssText = "display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "menu_button";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", closeImageSettingsDialog);
+
+    const regenBtn = document.createElement("button");
+    regenBtn.className = "menu_button";
+    regenBtn.innerHTML = `<i class="fa-solid fa-rotate"></i> Regenerate`;
+
+    regenBtn.addEventListener("click", () => {
+        const prompt = promptTextarea.value.trim();
+        if (!prompt) {
+            toastr.warning("Prompt cannot be empty.", "ComfyInject");
+            return;
+        }
+
+        const ar = orientationField.querySelector("input[name='comfyinject-settings-ar']:checked")?.value;
+        if (!ar) return;
+
+        // Close immediately — the retry button's spinner shows the progress
+        closeImageSettingsDialog();
+
+        retryImage(sendDate, imgIndex, {
+            prompt,
+            ar,
+            resolution: getOrientationResolution(ar),
+        }).catch((err) => console.error("[ComfyInject] Regeneration from image settings failed:", err));
+    });
+
+    footer.appendChild(cancelBtn);
+    footer.appendChild(regenBtn);
+    panel.appendChild(footer);
+
+    // Close on Escape and on backdrop click (panel clicks do not close it)
+    const escHandler = (e) => {
+        if (e.key === "Escape") closeImageSettingsDialog();
+    };
+    document.addEventListener("keydown", escHandler);
+    overlay._escHandler = escHandler;
+
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) closeImageSettingsDialog();
+    });
+
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+}
+
+/**
+ * Closes the image settings dialog if it is open.
+ */
+function closeImageSettingsDialog() {
+    const overlay = document.getElementById("comfyinject-image-settings-overlay");
+    if (!overlay) return;
+    if (overlay._escHandler) {
+        document.removeEventListener("keydown", overlay._escHandler);
+    }
+    overlay.remove();
 }
 
 /**
