@@ -298,14 +298,52 @@ function addRetryButtons(index) {
 }
 
 /**
- * Adds left/right navigation buttons to one image's wrapper.
- * The buttons cycle through the versions of this image (the original
+ * Resolves the metadata entry and version history array for one image.
+ * Handles both metadata shapes (array of per-image entries, or a single
+ * legacy object) and both keys (send_date, legacy message index).
+ * @param {string} sendDate - The send_date of the message
+ * @param {number} imgIndex - 0-based index of the image within the message
+ * @returns {{metadata: object|null, metaKey: string|number, metaEntry: object|null, entry: object, history: Array<object>}}
+ */
+function resolveVersionMeta(sendDate, imgIndex) {
+    const metadata = SillyTavern.getContext().chatMetadata[MODULE_NAME];
+    if (!metadata) {
+        return { metadata: null, metaKey: null, metaEntry: null, entry: {}, history: [] };
+    }
+
+    const messageIndex = findIndexBySendDate(sendDate);
+    const metaKey = metadata[sendDate] ? sendDate : messageIndex;
+    const metaEntry = metaKey === -1 ? null : metadata[metaKey] || null;
+
+    let entry;
+    if (Array.isArray(metaEntry)) {
+        entry = metaEntry[imgIndex] && typeof metaEntry[imgIndex] === "object" ? metaEntry[imgIndex] : {};
+    } else if (metaEntry && typeof metaEntry === "object") {
+        entry = metaEntry;
+    } else {
+        entry = {};
+    }
+
+    const history = Array.isArray(entry.history) ? entry.history : [];
+
+    return { metadata, metaKey, metaEntry, entry, history };
+}
+
+/**
+ * Adds left/right navigation buttons, a delete button, and a position
+ * counter to one image's wrapper.
+ * The chevrons cycle through the versions of this image (the original
  * generation plus every result of its regenerate button) with wrap-around.
+ * The trash button permanently removes the currently shown version from
+ * the version history (disabled when only one version remains).
+ * The counter shows the current version number and the total count.
  * Images from other markers in the message are never shown.
  * Navigation is display-only: only the visible <img> src changes,
  * the saved message and metadata are untouched, so the latest saved
  * version returns on the next re-render (swipe, edit, or reload).
- * While the image has a single version the buttons are present but do nothing.
+ * Deletion is persistent: the metadata history is rewritten and saved.
+ * While the image has a single version the chevrons do nothing and the
+ * delete button is disabled.
  * @param {HTMLElement} wrapper - The image wrapper element
  * @param {HTMLElement} img - The image element to navigate
  * @param {string} sendDate - The send_date of the message
@@ -318,18 +356,7 @@ function addNavButtons(wrapper, img, sendDate, imgIndex) {
     let displayIndex = -1;
 
     const navigate = (direction) => {
-        const context = SillyTavern.getContext();
-        const metadata = context.chatMetadata[MODULE_NAME];
-        if (!metadata) return;
-
-        const messageIndex = findIndexBySendDate(sendDate);
-        let images = getImageData(metadata, sendDate);
-        if (images.length === 0 && messageIndex !== -1) {
-            images = getImageData(metadata, messageIndex);
-        }
-
-        const entry = images[imgIndex] || {};
-        const history = Array.isArray(entry.history) ? entry.history : [];
+        const { history } = resolveVersionMeta(sendDate, imgIndex);
         if (history.length <= 1) return;
 
         if (displayIndex < 0) displayIndex = history.length - 1;
@@ -340,6 +367,8 @@ function addNavButtons(wrapper, img, sendDate, imgIndex) {
         if (version?.imageUrl) {
             img.src = version.imageUrl;
         }
+
+        updateCounter();
     };
 
     const buttons = [
@@ -362,6 +391,53 @@ function addNavButtons(wrapper, img, sendDate, imgIndex) {
 
         wrapper.appendChild(btn);
     }
+
+    // Create the delete button (top-left corner)
+    const deleteBtn = document.createElement("div");
+    deleteBtn.className = "comfyinject-delete";
+    deleteBtn.style.cssText = "position: absolute; top: 6px; left: 6px; cursor: pointer; background: rgba(0,0,0,0.6); color: white; border-radius: 4px; padding: 2px 8px; font-size: 12px; z-index: 10;";
+    deleteBtn.innerHTML = `<i class="fa-solid fa-trash-can"></i>`;
+
+    const setDeleteEnabled = (enabled) => {
+        deleteBtn.style.pointerEvents = enabled ? "auto" : "none";
+        deleteBtn.style.opacity = enabled ? "1" : "0.4";
+        deleteBtn.title = enabled ? "Delete this version" : "Only one version remains";
+    };
+
+    deleteBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const { history } = resolveVersionMeta(sendDate, imgIndex);
+        if (history.length <= 1) return;
+
+        const index = displayIndex >= 0 ? Math.min(displayIndex, history.length - 1) : history.length - 1;
+        const result = await deleteVersion(sendDate, imgIndex, index, img);
+        if (!result) return;
+
+        displayIndex = result.newIndex;
+        updateCounter();
+        setDeleteEnabled(result.total > 1);
+    });
+
+    wrapper.appendChild(deleteBtn);
+
+    // Create the version counter (bottom-right corner)
+    const counterEl = document.createElement("div");
+    counterEl.className = "comfyinject-counter";
+    counterEl.title = "Current version / total versions";
+    counterEl.style.cssText = "position: absolute; bottom: 6px; right: 6px; background: rgba(0,0,0,0.6); color: white; border-radius: 4px; padding: 2px 8px; font-size: 12px; z-index: 10;";
+
+    const updateCounter = () => {
+        const { history } = resolveVersionMeta(sendDate, imgIndex);
+        const total = Math.max(history.length, 1);
+        const position = displayIndex >= 0 ? Math.min(displayIndex, total - 1) : total - 1;
+        counterEl.textContent = `${position + 1} / ${total}`;
+    };
+
+    wrapper.appendChild(counterEl);
+
+    setDeleteEnabled(resolveVersionMeta(sendDate, imgIndex).history.length > 1);
+    updateCounter();
 }
 
 /**
@@ -464,7 +540,7 @@ async function processMessage(index, options = {}) {
                 shotTags,
                 repairMeta,
                 history: [
-                    { seed, imageUrl, promptId, filename },
+                    { seed, imageUrl, promptId, filename, prompt },
                 ],
             });
         } else if (result?.status === "parse_error") {
@@ -720,7 +796,7 @@ async function retryImage(sendDate, imgIndex, overrides = {}) {
     const metaKey = metadata[sendDate] ? sendDate : messageIndex;
     const metaEntry = metadata[metaKey];
 
-    const newVersion = { seed: effectiveSeed, imageUrl, promptId, filename };
+    const newVersion = { seed: effectiveSeed, imageUrl, promptId, filename, prompt };
 
     if (Array.isArray(metaEntry)) {
         const existingEntry = metaEntry[imgIndex] && typeof metaEntry[imgIndex] === "object"
@@ -728,7 +804,7 @@ async function retryImage(sendDate, imgIndex, overrides = {}) {
             : {};
 
         const oldVersion = oldUrl
-            ? { seed: oldSeed, imageUrl: oldUrl, promptId: existingEntry.promptId ?? null, filename: existingEntry.filename ?? null }
+            ? { seed: oldSeed, imageUrl: oldUrl, promptId: existingEntry.promptId ?? null, filename: existingEntry.filename ?? null, prompt: tagPrompt }
             : null;
         const history = appendVersionHistory(existingEntry.history, oldVersion, newVersion);
 
@@ -748,7 +824,7 @@ async function retryImage(sendDate, imgIndex, overrides = {}) {
         };
     } else if (metaEntry && typeof metaEntry === "object") {
         const oldVersion = oldUrl
-            ? { seed: oldSeed, imageUrl: oldUrl, promptId: metaEntry.promptId ?? null, filename: metaEntry.filename ?? null }
+            ? { seed: oldSeed, imageUrl: oldUrl, promptId: metaEntry.promptId ?? null, filename: metaEntry.filename ?? null, prompt: tagPrompt }
             : null;
         const history = appendVersionHistory(metaEntry.history, oldVersion, newVersion);
 
@@ -795,6 +871,84 @@ async function retryImage(sendDate, imgIndex, overrides = {}) {
     await context.saveChat();
 
     return true;
+}
+
+/**
+ * Permanently deletes one version from an image's version history.
+ * The version that shifted into the deleted slot becomes the new display
+ * position (wrapping to the first version when the last one is deleted).
+ * When the deleted version was the latest saved one, the <img> tag in
+ * message.mes is rewritten to the new latest version so re-renders stay
+ * consistent. The message is not re-rendered here: the live <img> is
+ * updated in place so the position chosen above is shown right away.
+ * @param {string} sendDate - The send_date of the message
+ * @param {number} imgIndex - Which image within the message (0-based)
+ * @param {number} deleteIndex - 0-based position of the version to delete
+ * @param {HTMLElement} img - The live image element to update in place
+ * @returns {Promise<{newIndex: number, total: number}|null>} The new display
+ * position and version count, or null when nothing was deleted
+ */
+async function deleteVersion(sendDate, imgIndex, deleteIndex, img) {
+    const context = SillyTavern.getContext();
+    const { metaKey, metaEntry, entry, history } = resolveVersionMeta(sendDate, imgIndex);
+    if (!metaEntry || history.length <= 1) return null;
+    if (deleteIndex < 0 || deleteIndex >= history.length) return null;
+
+    const messageIndex = findIndexBySendDate(sendDate);
+    const message = context.chat[messageIndex];
+    if (!message) return null;
+
+    const versions = [...history];
+    const deleted = versions.splice(deleteIndex, 1)[0];
+    const newIndex = deleteIndex % versions.length;
+
+    const imgTags = [...message.mes.matchAll(/<img class="comfyinject-image"[^>]*>/g)];
+    const targetTag = imgTags[imgIndex]?.[0];
+
+    let newTag = null;
+    if (targetTag) {
+        const tagUrl = targetTag.match(/src="([^"]*)"/)?.[1] || "";
+        if (tagUrl && tagUrl === deleted?.imageUrl) {
+            // The latest saved version was deleted: promote the new latest
+            // version into the saved <img> tag and the entry's top-level
+            // fields (which always mirror the latest version).
+            const newLatest = versions[versions.length - 1];
+            const tagPrompt = targetTag.match(/data-prompt="([^"]*)"/)?.[1]?.replace(/&quot;/g, '"') || "";
+            newTag = buildImgTag(newLatest.imageUrl, newLatest.prompt ?? tagPrompt, newLatest.seed);
+            entry.seed = newLatest.seed;
+            entry.promptId = newLatest.promptId ?? null;
+            entry.filename = newLatest.filename ?? null;
+        }
+    }
+
+    entry.history = versions;
+    if (Array.isArray(metaEntry)) {
+        metaEntry[imgIndex] = entry;
+    } else {
+        context.chatMetadata[MODULE_NAME][metaKey] = entry;
+    }
+
+    if (newTag) {
+        let count = 0;
+        message.mes = message.mes.replace(/<img class="comfyinject-image"[^>]*>/g, (match) => {
+            if (count === imgIndex) {
+                count++;
+                return newTag;
+            }
+            count++;
+            return match;
+        });
+    }
+
+    const shown = versions[newIndex];
+    if (shown?.imageUrl) {
+        img.src = shown.imageUrl;
+    }
+
+    await context.saveMetadata();
+    await context.saveChat();
+
+    return { newIndex, total: versions.length };
 }
 
 /**
